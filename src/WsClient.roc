@@ -15,7 +15,7 @@ import ws.Handshake
 ## when the connection opens. A read that times out consumes nothing and the
 ## connection keeps every byte it has read, so a timeout never loses data:
 ## `receive!` keeps waiting through it, and `poll!` returns `TimedOut` when it
-## passes with no message. Unlike basic-webserver, the read timeout is
+## passes with no message (`receive_within!` sets it for one call). Unlike basic-webserver, the read timeout is
 ## yours to choose (`read_timeout`, 30 s by default), so a short one makes
 ## `poll!` a cheap check. A write that times out may have sent a prefix of its
 ## bytes, so it is the error `Tcp(TimedOut)`: drop the connection.
@@ -79,14 +79,46 @@ WsClient :: [].{
 		Client.open!(WsClient.transport, link, request)
 	}
 
-	## The operations as a record (`Ws.Raw` and `Ws.Poll`), for code generic
-	## over features.
-	ops : Client.Ops(WsClient.Link, WsClient.Errors)
-	ops = Client.ops({})
+	## The next message, or `TimedOut` when `ms` milliseconds pass first
+	## (`Ws.ReceiveWithin`). The connection keeps every byte it has read, so a
+	## timeout loses nothing, even inside a frame.
+	##
+	## It sets the Tcp read timeout of the connection to `ms` for this call
+	## (`Conn.map_link`) and polls, so `ms` bounds each read: a peer that sends
+	## a frame in pieces, each within `ms`, can keep the call waiting longer.
+	## The connection's own `read_timeout` applies again after the call.
+	##
+	## ```roc
+	## (conn2, got) = WsClient.receive_within!(conn, 250)?
+	## ```
+	receive_within! : WsClient.Conn, U64 => Try((WsClient.Conn, [Message(Ws.Message), TimedOut]), WsClient.Error)
+	receive_within! = |conn, ms| {
+		own = conn.link().read
+		shortened = conn.map_link(|link| { ..link, read: own.with_timeout(Duration.millis(ms)) })
+		match shortened.poll!() {
+			Ok((after, got)) => Ok((after.map_link(|link| { ..link, read: own }), got))
+			Err(err) => Err(err)
+		}
+	}
+
+	## The operations as a record (`Ws.Raw`, `Ws.Poll` and `Ws.ReceiveWithin`),
+	## for code generic over features.
+	ops : Ws.Core(WsClient.Conn, Client.Errors(WsClient.Errors), Ws.Ping(WsClient.Conn, Client.Errors(WsClient.Errors), Ws.Pong(WsClient.Conn, Client.Errors(WsClient.Errors), Ws.Frames(WsClient.Conn, Client.Errors(WsClient.Errors), Ws.Poll(WsClient.Conn, Client.Errors(WsClient.Errors), Ws.ReceiveWithin(WsClient.Conn, Client.Errors(WsClient.Errors), {}))))))
+	ops = {
+		send!: |c, m| c.send!(m),
+		receive!: |c| c.receive!(),
+		close!: |c, code, reason| c.close!(code, reason),
+		ping!: |c, p| c.ping!(p),
+		pong!: |c, p| c.pong!(p),
+		send_frame!: |c, f| c.send_frame!(f),
+		receive_frame!: |c| c.receive_frame!(),
+		poll!: |c| c.poll!(),
+		receive_within!: |c, ms| WsClient.receive_within!(c, ms),
+	}
 
 	## The `Ws.Connect` feature record.
-	dial : Ws.Connect(WsClient.Conn, Client.Errors(WsClient.Errors), {})
-	dial = { connect!: WsClient.connect! }
+	connect : Ws.Connect(WsClient.Conn, Client.Errors(WsClient.Errors), {})
+	connect = { connect!: WsClient.connect! }
 
 	## The byte stream and randomness `Client.open!` needs.
 	transport : Client.Transport(WsClient.Link, WsClient.Errors)

@@ -3,13 +3,14 @@
 ##   client echo [port]   talks to an echo server on 127.0.0.1 (tests/echo_server.py,
 ##                        port 9001 by default) and reports each step.
 ##   client slow [port]   asks the echo server to wait 3 s with a 500 ms read timeout:
-##                        `poll!` gives TimedOut, then the reply, with nothing lost.
+##                        `poll!` gives TimedOut, then the reply, with nothing lost; then
+##                        `receive_within!` with 200 ms and with 5000 ms.
 ##   client surreal       sends JSON `ping` and `version` RPCs to SurrealDB at
 ##                        ws://127.0.0.1:8000/rpc.
 app [main!] {
 	cli_ws: "../src/main.roc",
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
-	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.3/FvsFHmH7m6LoMumXLxEHEfUoApGWdkgoFshfYEctaMNM.tar.zst",
+	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.4/FL5ikchJCgQXzACMnEovFpvUKG8uxCmGYy3zNvzbvFwd.tar.zst",
 }
 
 import pf.Duration
@@ -144,6 +145,11 @@ slow! = |port| {
 		$last = got
 		$polls = $polls + 1
 	}
-	_ = Ws.close_and_wait!(WsClient.ops, $conn, 1000, "")?
-	Ok("first poll: ${Str.inspect(first)}\ntimed out polls before the reply: ${($polls - 1).to_str()}\nreply: ${Str.inspect($last)}\n")
+
+	# A per-call timeout: receive_within! shortens the read timeout for one call.
+	c3 = $conn.send!(Text("sleep:1"))?
+	(c4, short) = WsClient.receive_within!(c3, 200)?
+	(c5, long) = (WsClient.ops.receive_within!)(c4, 5000)?
+	_ = Ws.close_and_wait!(WsClient.ops, c5, 1000, "")?
+	Ok("first poll: ${Str.inspect(first)}\ntimed out polls before the reply: ${($polls - 1).to_str()}\nreply: ${Str.inspect($last)}\nreceive_within 200 ms: ${Str.inspect(short)}\nreceive_within 5000 ms: ${Str.inspect(long)}\n")
 }

@@ -30,6 +30,8 @@ if [[ "${1:-}" == "--e2e" ]]; then
 	echo "$slow"
 	grep -q 'first poll: TimedOut' <<<"$slow"
 	grep -q 'reply: Message(Text("woke up"))' <<<"$slow"
+	grep -q 'receive_within 200 ms: TimedOut' <<<"$slow"
+	grep -q 'receive_within 5000 ms: Message(Text("woke up"))' <<<"$slow"
 	if (: >/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
 		surreal="$("$out/client" surreal)"
 		echo "$surreal"
