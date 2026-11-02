@@ -98,7 +98,7 @@ be dropped.
 
 The first release: a client over `pf.Tcp`, for roc-websocket 0.0.4 and
 basic-cli 0.26.0, with `receive_within!`. Built with Roc `nightly-2026-10-12-2664a27` (the nightly
-basic-cli 0.26.0 is built with) and tested on `nightly-2026-10-31-f7bef6b`.
+basic-cli 0.26.0 is built with) and tested on `nightly-2026-11-01-48d3369` (the pin in `.roc-version`).
 
 ## Checks
 
