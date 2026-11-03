@@ -1,8 +1,15 @@
 # roc-basic-cli-websocket
 
-A WebSocket client for [basic-cli](https://github.com/roc-lang/basic-cli)
+WebSocket clients and servers for [basic-cli](https://github.com/roc-lang/basic-cli)
 0.26.0, built on [roc-websocket](https://github.com/Karakatiza666/roc-websocket).
-Use it in a command-line program to talk to a WebSocket server.
+Use it in a command-line program to talk to a WebSocket server (`WsClient`) or
+to be one (`WsServer`).
+
+> **Unreleased (branch `server`).** `WsServer` needs roc-websocket's server
+> driver, which is not released yet: until roc-websocket 0.0.5 is out, this
+> branch depends on a checkout of it next to this repository
+> (`ws: "../../roc-websocket/src/main.roc"` in `src/main.roc` and the
+> examples), so `roc bundle` and `scripts/test_bundle.sh` do not work here.
 
 ```roc
 app [main!] {
@@ -55,6 +62,71 @@ connection has ended, `Closing` from `send!` and the other senders after
 messages on their way, then ends with `Closed`). `opened.extensions` is
 `Reported(list)` (this client gives `Reported([])`) or `NotReported`.
 
+## Server
+
+```roc
+app [main!] {
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
+	ws: "<roc-websocket 0.0.5>",
+	cli_ws: "<this package>",
+}
+
+import pf.Duration
+import pf.OsStr
+import pf.Tcp
+import cli_ws.WsServer
+
+main! : List(OsStr) => Try({}, _)
+main! = |_args| {
+	listener = Tcp.listen!("127.0.0.1", 9002, Duration.seconds(5))?
+	opened = WsServer.accept!(listener, { protocols: ["echo"] }, {})?
+	(conn, message) = opened.conn.receive!()?
+	conn2 = conn.send!(message)?
+	_ = conn2.receive!()
+	Ok({})
+}
+```
+
+- `WsServer.accept! : Tcp.Listener, Ws.AcceptOptions, WsServer.Options => Try(Ws.Opened(WsServer.Conn), WsServer.Error)`:
+  wait for a client, read its upgrade request, answer 101 with the first
+  subprotocol of the client's offer that is in `protocols`.
+- `WsServer.read_request! : Tcp.Listener, WsServer.Options => Try(WsServer.Request, WsServer.Error)`,
+  the two-step form: `request.upgrade()` (resource, `Host`, offered
+  subprotocols, headers), then `request.accept!(options)` or
+  `request.refuse!({ status: 404, headers ?: ..., body ?: "..." })`.
+- `WsServer.Options = { accept_timeout ?: [NoTimeout, After(Duration)], handshake_timeout ?: Duration, read_timeout ?: Duration, write_timeout ?: Duration }`
+  (defaults `NoTimeout`, 5 s, 30 s, 30 s). The request head must arrive within
+  `handshake_timeout`; the connection's reads then use `read_timeout`.
+- `WsServer.Conn = Server.Conn(WsServer.Link, WsServer.Errors)`, with the
+  methods of `WsClient.Conn`; `WsServer.receive_within!`, `WsServer.ops`
+  (`Server.Ops` and `Ws.ReceiveWithin`) and `WsServer.transport`, as for the client.
+- `WsServer.Errors = [Tcp(IOErr), Accept(IOErr), ListenerClosed, Interrupted]`:
+  `Accept(TimedOut)` is `accept_timeout` passing with no client (the listener
+  can accept again). `WsServer.Error = Server.Error(WsServer.Errors)` adds
+  `NotUpgrade(Str)` (a request that is not an upgrade, answered with 400, 405,
+  426 or 431 already, or no whole request within `handshake_timeout`),
+  `InvalidStatus(U16)` and the frame tags.
+- `WsServer.serve! : Tcp.Listener, WsServer.Options, WsServer.Service(s), s => Try(s, WsServer.Error)`
+  serves one connection at a time with `Ws.drive!`. `WsServer.Service(s) = { route : Handshake.Upgrade -> WsServer.Route, handlers : Ws.Handlers(s, WsServer.Conn, ...), stop : s -> Bool }`,
+  `WsServer.Route = [Accept(Ws.AcceptOptions), Refuse(Server.Refusal)]`.
+- `WsServer.serve_many! : Tcp.Listener, WsServer.Options, WsServer.Service(s), U64, s => Try(s, WsServer.Error)`
+  serves several connections in turns, polling each for at most `slice`
+  milliseconds (`receive_within!`). basic-cli has no readiness primitive and no
+  threads, so a turn over `n` idle connections takes about `n` slices, and a
+  new client's handshake holds the turn for up to `handshake_timeout`.
+
+The handlers share one state `s`. `serve!` and `serve_many!` drop a client
+whose handshake fails and go on. Where they differ: a reply to a message that
+arrived in the same read as the client's Close gives `Err(Closed)` (the Close
+was echoed at once); `serve_many!` then still delivers the rest and calls
+`on_close!`, while `Ws.drive!` ends with that error, so `serve!` keeps the
+state from before that connection.
+
+basic-cli's Tcp has no close: the socket closes when the last copy of it is
+released. Once a call gives `Closed`, drop the connection (and the result of
+`refuse!`), and the server closes the TCP connection, as RFC 6455 section
+7.1.1 asks. `serve!` and `serve_many!` do.
+
 ## Mapping to basic-cli
 
 | roc-websocket | basic-cli |
@@ -85,8 +157,8 @@ be dropped.
 
 ## Limitations
 
-- **Client only.** basic-cli has `Tcp.listen!`, but roc-websocket's server side
-  is not part of this package.
+- **One thread, no readiness primitive.** `serve_many!` polls each
+  connection in turn; latency grows with the number of idle connections.
 - **`ws://` only.** The platform's Tcp has no TLS. `wss://` is `Refused`.
 - **No cancellation.** A signal during a call is the error `Interrupted`.
 - Randomness comes from `Random.seed_u64!`, the operating system's entropy
@@ -106,6 +178,11 @@ basic-cli 0.26.0 is built with) and tested on `nightly-2026-11-01-48d3369` (the 
 ROC=/path/to/roc scripts/all_tests.sh          # fmt, check
 ROC=/path/to/roc scripts/all_tests.sh --e2e    # also a live run against tests/echo_server.py
 ```
+
+`--e2e` also runs `examples/server.roc` (`one`, `many` and `raw` modes) against the
+client example and `tests/server_test.py`, raw sockets and, when `$PYTHON` has the
+`websockets` package, that independent client:
+`PYTHON=/path/to/venv/bin/python ROC=/path/to/roc scripts/all_tests.sh --e2e`.
 
 `examples/client.roc` has `echo [port]` (the Python stdlib test server in `tests/`),
 `slow [port]` (`poll!` across a 500 ms read timeout, then `receive_within!`) and `surreal` (JSON `ping` and
