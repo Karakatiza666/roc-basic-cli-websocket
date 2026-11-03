@@ -4,7 +4,8 @@
 ##   server many <port> <n>   serves several at once, in turns (`WsServer.serve_many!`)
 ##   server raw <port>        one connection with the two-step form and the methods
 ##
-## Each stops after `n` connections have closed. Routes: `/private...` is refused
+## Each stops after `n` connections have closed. Port 0 asks the system for a
+## free port; the first line printed is `listening on <port>`. Routes: `/private...` is refused
 ## with 403, `/missing...` with 404; anything else is accepted, with the
 ## subprotocols `echo` and `chat` (the first of the client's offer that is one
 ## of them) and messages of at most 1 MiB.
@@ -48,7 +49,8 @@ main! = |args| {
 	port = U16.from_str(port_text) ?? 9002
 	limit = U64.from_str(n_text) ?? 1
 	listener = Tcp.listen!("127.0.0.1", port, Duration.seconds(5))?
-	Stdout.line!("listening on ${port.to_str()}")?
+	# Port 0 asks the system for a free one.
+	Stdout.line!("listening on ${listener.local_port!()?.to_str()}")?
 	start = { messages: 0, closed: 0, limit }
 	result = match mode {
 		"one" => WsServer.serve!(listener, {}, service, start)
