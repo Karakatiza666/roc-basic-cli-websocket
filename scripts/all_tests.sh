@@ -81,6 +81,15 @@ if [[ "${1:-}" == "--e2e" ]]; then
 		"$PYTHON" -I tests/server_test.py "$port" "$mode"
 		kill "${servers[-1]}"
 	done
+	# Messages sent with the client's Close: both are answered, and the
+	# connection reaches on_close! (the server stops after it).
+	for mode in one many; do
+		start_server "$mode" "close-$mode" 1
+		"$PYTHON" -I tests/server_test.py "$port" close
+		wait "${servers[-1]}"
+		grep -q 'closed: { by: Peer, clean: True, code: 1000' "$out/close-$mode.log"
+		grep -q 'done: 2 messages, 1 connections' "$out/close-$mode.log"
+	done
 	start_server raw raw
 	"$PYTHON" -I tests/server_test.py "$port" raw
 	wait "${servers[-1]}"

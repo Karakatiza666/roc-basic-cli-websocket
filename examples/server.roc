@@ -5,10 +5,11 @@
 ##   server raw <port>        one connection with the two-step form and the methods
 ##
 ## Each stops after `n` connections have closed. Port 0 asks the system for a
-## free port; the first line printed is `listening on <port>`. Routes: `/private...` is refused
-## with 403, `/missing...` with 404; anything else is accepted, with the
-## subprotocols `echo` and `chat` (the first of the client's offer that is one
-## of them) and messages of at most 1 MiB.
+## free port; the first line printed is `listening on <port>`. Routes:
+## `/versions...` accepts the subprotocols `chat` and `v2`, in that order;
+## `/private...` is refused with 403, `/missing...` with 404; anything else is
+## accepted, with the subprotocols `echo` and `chat` (the first of these that
+## the client offered) and messages of at most 1 MiB.
 ##
 ## Every connection first gets a Ping "hello-ping". Each message is echoed,
 ## except these text messages, as tests/echo_server.py answers them:
@@ -21,7 +22,7 @@
 app [main!] {
 	cli_ws: "../src/main.roc",
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
-	ws: "../../roc-websocket/src/main.roc",
+	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.5/AKLgwxjBQN2XkE4G5sZtzrjPSxhwo6XmJRSPdWhpgVUN.tar.zst",
 }
 
 import pf.Duration
@@ -30,7 +31,6 @@ import pf.Stdout
 import pf.Stderr
 import pf.Tcp
 import ws.Ws
-import ws.Handshake
 import cli_ws.WsServer
 
 State : { messages : U64, closed : U64, limit : U64 }
@@ -52,14 +52,19 @@ main! = |args| {
 	# Port 0 asks the system for a free one.
 	Stdout.line!("listening on ${listener.local_port!()?.to_str()}")?
 	start = { messages: 0, closed: 0, limit }
-	result = match mode {
+	(s, ended) = match mode {
 		"one" => WsServer.serve!(listener, {}, service, start)
 		"many" => WsServer.serve_many!(listener, {}, service, 10, start)
-		"raw" => raw!(listener)
-		_ => Ok(start)
+		"raw" => match raw!(listener) {
+			Ok(done) => (done, Ok({}))
+			Err(err) => (start, Err(err))
+		}
+		_ => (start, Ok({}))
 	}
-	match result {
-		Ok(s) => Stdout.line!("done: ${s.messages.to_str()} messages, ${s.closed.to_str()} connections")
+	# The state comes with an error too.
+	Stdout.line!("done: ${s.messages.to_str()} messages, ${s.closed.to_str()} connections")?
+	match ended {
+		Ok({}) => Ok({})
 		Err(err) => {
 			Stderr.line!("server failed: ${Str.inspect(err)}")?
 			Err(Exit(1))
@@ -67,10 +72,12 @@ main! = |args| {
 	}
 }
 
-route : Handshake.Upgrade -> WsServer.Route
+route : Ws.Upgrade -> WsServer.Route
 route = |upgrade|
 	if upgrade.resource.starts_with("/private") {
 		Refuse({ status: 403, body: "no access to ${upgrade.resource}" })
+	} else if upgrade.resource.starts_with("/versions") {
+		Accept({ protocols: ["chat", "v2"] })
 	} else if upgrade.resource.starts_with("/missing") {
 		Refuse({ status: 404, headers: [("X-Route", "none")], body: "no endpoint at ${upgrade.resource}" })
 	} else {
@@ -89,7 +96,7 @@ service = {
 			Ok(after) => Ok(({ ..s, messages: s.messages + 1 }, after))
 			Err(err) => Err(err)
 		},
-		on_close!: |s, closure| {
+		on_close!: |s, _conn, closure| {
 			_ = Stdout.line!("closed: ${Str.inspect(closure)}")
 			Ok({ ..s, closed: s.closed + 1 })
 		},

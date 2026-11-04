@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Checks examples/server.roc with an independent client, Python `websockets`.
 
-Usage: server_test.py <port> one|many|raw. Prints `ok <name>` for each check
+Usage: server_test.py <port> one|many|raw|close. Prints `ok <name>` for each check
 and exits 1 at the first failure. `one` and `many` are for `server one` and
 `server many` (`many` also runs several clients at once), `raw` for `server
-raw`. The checks through the `websockets` package (a venv is enough) are
+raw`, and `close` for the Close sent with the last messages only (the caller
+then reads the server's `on_close!` line). The checks through the `websockets` package (a venv is enough) are
 skipped when it is not installed; the raw-socket checks use the stdlib only.
 """
 import asyncio, base64, os, socket, struct, sys, time
@@ -30,7 +31,8 @@ def ok(name, passed, detail=""):
 
 async def echo_and_protocol():
     async with connect(URL + "/echo", subprotocols=["chat", "echo"]) as ws:
-        ok("subprotocol: the first of the client's offer the server supports", ws.subprotocol == "chat", ws.subprotocol)
+        # The server supports [echo, chat]: its order of preference decides.
+        ok("subprotocol: the server's order of preference", ws.subprotocol == "echo", ws.subprotocol)
         await ws.send("hello")
         ok("echo text", await ws.recv() == "hello")
         await ws.send(bytes([0, 1, 2, 255]))
@@ -39,6 +41,9 @@ async def echo_and_protocol():
         ok("fragmented reply with a Ping inside", await ws.recv() == "fragmented reply")
         await ws.send("ping-me")
         ok("reply after a server Ping", await ws.recv() == "pinged")
+    async with connect(URL + "/versions", subprotocols=["v2", "chat"]) as ws:
+        # /versions supports [chat, v2]: not the client's order.
+        ok("subprotocol: offered [v2, chat], supported [chat, v2]", ws.subprotocol == "chat", ws.subprotocol)
     async with connect(URL + "/echo", subprotocols=["superchat"]) as ws:
         ok("subprotocol: none when nothing matches", ws.subprotocol is None)
     async with connect(URL + "/") as ws:
@@ -95,8 +100,10 @@ async def large():
         await ws.send("big:3000000")
         got = await ws.recv()
         ok("a 3 MB message from the server", got == b"x" * 3000000)
-        await ws.send(b"y" * (1024 * 1024 + 1))
         try:
+            # The server fails the message at its frame header and closes TCP
+            # while the client may still be writing: the send itself can fail.
+            await ws.send(b"y" * (1024 * 1024 + 1))
             await ws.recv()
             ok("over max_message", False, "a message")
         except websockets.exceptions.ConnectionClosedError as e:
@@ -170,6 +177,10 @@ def messages_with_close():
     print("     frames after the 101: %r; TCP closed: %s" % ([(op, p[:20]) for op, p in frames], closed))
     ok("messages with the Close in one read: the Close is echoed", close == [struct.pack(">H", 1000)])
     ok("messages with the Close in one read: TCP closed by the server", closed)
+    # The echo of the Close is held until both messages are answered.
+    ok("messages with the Close in one read: both are answered", texts == [b"one", b"two"], repr(texts))
+    ok("messages with the Close in one read: the replies come before the Close",
+       [op for (op, _) in frames if op in (1, 8)] == [1, 1, 8], repr(frames))
     return texts
 
 
@@ -239,6 +250,9 @@ def two_step():
 async def main():
     if MODE == "raw":
         two_step()
+        return
+    if MODE == "close":
+        messages_with_close()
         return
     if websockets is None:
         print("skip the checks through `websockets`: not installed")

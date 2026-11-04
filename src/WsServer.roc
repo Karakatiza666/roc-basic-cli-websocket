@@ -3,7 +3,6 @@ import pf.IOErr
 import pf.Tcp
 import ws.Ws
 import ws.Server
-import ws.Handshake
 
 ## WebSocket servers for basic-cli 0.26.0, over `pf.Tcp` and the server driver
 ## of roc-websocket.
@@ -58,44 +57,26 @@ WsServer :: [].{
 
 	## What a server does with a request: accept it with options (the
 	## subprotocols it supports, the largest message) or refuse it.
-	Route : [Accept(Ws.AcceptOptions), Refuse(Server.Refusal)]
+	Route : [Accept(Ws.AcceptOptions), Refuse(Ws.Refusal)]
 
 	## A service for `serve!` and `serve_many!`: how to route each request,
 	## the handlers of each accepted connection, all sharing the state `s`,
 	## and when to stop: once `stop(s)` holds, no new client is accepted and
 	## the call returns when the connections it holds have ended.
 	Service(s) : {
-		route : Handshake.Upgrade -> WsServer.Route,
+		route : Ws.Upgrade -> WsServer.Route,
 		handlers : Ws.Handlers(s, WsServer.Conn, Server.Errors(WsServer.Errors)),
 		stop : s -> Bool,
 	}
 
 	## An upgrade request read from a client and validated, not answered yet,
-	## from `WsServer.read_request!`.
-	Request :: { request : Server.Request(WsServer.Link, WsServer.Errors), read : Tcp.Connection }.{
-
-		## The request: its resource, `Host`, the offered subprotocols and
-		## every header.
-		upgrade : WsServer.Request -> Handshake.Upgrade
-		upgrade = |r| r.request.upgrade()
-
-		## Accept the upgrade (`Server.Request.accept!`). The connection's
-		## reads then use `read_timeout`.
-		accept! : WsServer.Request, Ws.AcceptOptions => Try(Ws.Opened(WsServer.Conn), WsServer.Error)
-		accept! = |r, options| match r.request.accept!(options) {
-			Ok(opened) => Ok({ ..opened, conn: opened.conn.map_link(|link| { ..link, read: r.read }) })
-			Err(err) => Err(err)
-		}
-
-		## Refuse the upgrade with a status from 400 to 599
-		## (`Server.Request.refuse!`). The Tcp connection closes when the
-		## result is dropped.
-		refuse! : WsServer.Request, Server.Refusal => Try({}, WsServer.Error)
-		refuse! = |r, refusal| match r.request.refuse!(refusal) {
-			Ok(_) => Ok({})
-			Err(err) => Err(err)
-		}
-	}
+	## from `WsServer.read_request!`. Its methods: `upgrade()` (the resource,
+	## `Host`, the offered subprotocols and every header, a `Ws.Upgrade`),
+	## `accept!(options)` (the connection's reads then use `read_timeout`),
+	## `refuse!(refusal)` (a `Ws.Refusal` with a status from 200 to 599; it
+	## gives the link back, and the Tcp connection closes when that is
+	## dropped) and `map_link`.
+	Request : Server.Request(WsServer.Link, WsServer.Errors)
 
 	## Wait for a client on `listener` and read its upgrade request, for an
 	## application that looks at the request before it accepts or refuses.
@@ -106,7 +87,7 @@ WsServer :: [].{
 	##     opened = request.accept!({ protocols: ["echo"] })?
 	##     ...
 	## } else {
-	##     request.refuse!({ status: 404, body: "no such endpoint" })?
+	##     _ = request.refuse!({ status: 404, body: "no such endpoint" })?
 	## }
 	## ```
 	read_request! : Tcp.Listener, WsServer.Options => Try(WsServer.Request, WsServer.Error)
@@ -122,7 +103,7 @@ WsServer :: [].{
 			write: tcp.with_timeout(options.?write_timeout ?? Duration.seconds(30)),
 		}
 		match Server.read_request!(WsServer.transport, link) {
-			Ok(request) => Ok(WsServer.Request.{ request, read: tcp })
+			Ok(request) => Ok(request.map_link(|l| { ..l, read: tcp }))
 			Err(err) => Err(err)
 		}
 	}
@@ -170,38 +151,39 @@ WsServer :: [].{
 
 	## Serve one connection at a time: accept a client, route its request,
 	## and run `service.handlers` over the connection with `Ws.drive!` until
-	## it closes; then the next client. Returns the state once `service.stop`
-	## holds after a connection, or at the first error of the listener.
+	## it closes; then the next client. Returns once `service.stop` holds
+	## after a connection, or at the first error of the listener.
 	##
-	## A client whose handshake fails, or whose connection fails, is dropped
-	## and the next one accepted. `Ws.drive!` gives no state with its error,
-	## so a connection that fails leaves the state as it was before that
-	## connection.
-	serve! : Tcp.Listener, WsServer.Options, WsServer.Service(s), s => Try(s, WsServer.Error)
+	## The result is the state and how the call ended, as `Ws.drive!` gives
+	## them: `(s, Ok({}))` after `stop`, or `(s, Err(err))` with the state
+	## every connection so far left. A server that fails at its listener
+	## has served connections, and their state is what it must save or
+	## report; a `Try(s, e)` would lose it, as `drive!` before 0.0.5 did.
+	## A client whose handshake fails, or whose connection ends in an error,
+	## is dropped and the next one accepted; the state is then what `Ws.drive!`
+	## returned with that error.
+	serve! : Tcp.Listener, WsServer.Options, WsServer.Service(s), s => (s, Try({}, WsServer.Error))
 	serve! = |listener, options, service, state| {
 		var $s = state
 		while !(service.stop)($s) {
 			match WsServer.read_request!(listener, options) {
 				Ok(request) =>
 					match routed!(request, (service.route)(request.upgrade())) {
-						Ok(Opened(conn)) =>
-							match Ws.drive!(WsServer.ops, conn, $s, service.handlers) {
-								Ok(after) => {
-									$s = after
-								}
-								Err(_) => {}
-							}
+						Ok(Opened(conn)) => {
+							(after, _) = Ws.drive!(WsServer.ops, conn, $s, service.handlers)
+							$s = after
+						}
 						Ok(Refused) => {}
 						Err(_) => {}
 					}
-				Err(ListenerClosed) => return Err(ListenerClosed)
-				Err(Interrupted) => return Err(Interrupted)
+				Err(ListenerClosed) => return ($s, Err(ListenerClosed))
+				Err(Interrupted) => return ($s, Err(Interrupted))
 				Err(Accept(TimedOut)) => {}
-				Err(Accept(err)) => return Err(Accept(err))
+				Err(Accept(err)) => return ($s, Err(Accept(err)))
 				Err(_) => {}
 			}
 		}
-		Ok($s)
+		($s, Ok({}))
 	}
 
 	## Serve several connections at once, in turns. Each turn accepts a new
@@ -214,12 +196,14 @@ WsServer :: [].{
 	## basic-cli has no readiness primitive. The handshake of a new client
 	## holds the turn for up to `handshake_timeout`.
 	##
-	## A handler error `Closed` (a reply to a message that arrived with the
-	## client's Close) keeps the connection as it was before the call, so the
-	## rest of its messages and `on_close!` still come. Another handler error
-	## closes the connection with 1011. A connection that fails at the
-	## transport ends with `on_close!` of `Ws.dropped`.
-	serve_many! : Tcp.Listener, WsServer.Options, WsServer.Service(s), U64, s => Try(s, WsServer.Error)
+	## The result is the state and how the call ended, as `serve!` gives it.
+	##
+	## A handler error `Closed` keeps the connection as it was before the
+	## call, so the rest of its messages and `on_close!` still come, as in
+	## `Ws.drive!`. Another handler error closes the connection with 1011. A
+	## connection that fails at the transport ends with `on_close!` of
+	## `Ws.dropped`, given the connection as the last call left it.
+	serve_many! : Tcp.Listener, WsServer.Options, WsServer.Service(s), U64, s => (s, Try({}, WsServer.Error))
 	serve_many! = |listener, options, service, slice, state| {
 		var $s = state
 		var $conns = []
@@ -244,10 +228,10 @@ WsServer :: [].{
 							Ok(Refused) => {}
 							Err(_) => {}
 						}
-					Err(ListenerClosed) => return Err(ListenerClosed)
-					Err(Interrupted) => return Err(Interrupted)
+					Err(ListenerClosed) => return ($s, Err(ListenerClosed))
+					Err(Interrupted) => return ($s, Err(Interrupted))
 					Err(Accept(TimedOut)) => {}
-					Err(Accept(err)) => return Err(Accept(err))
+					Err(Accept(err)) => return ($s, Err(Accept(err)))
 					Err(_) => {}
 				}
 			}
@@ -272,21 +256,21 @@ WsServer :: [].{
 										$kept = $kept.append(closing)
 									}
 									Err(_) => {
-										$s = closed!(service, $s, Ws.dropped)
+										$s = closed!(service, $s, polled, Ws.dropped)
 									}
 								}
 						}
 					Err(Closed(closure)) => {
-						$s = closed!(service, $s, closure)
+						$s = closed!(service, $s, conn, closure)
 					}
 					Err(_) => {
-						$s = closed!(service, $s, Ws.dropped)
+						$s = closed!(service, $s, conn, Ws.dropped)
 					}
 				}
 			}
 			$conns = $kept
 		}
-		Ok($s)
+		($s, Ok({}))
 	}
 
 	## The byte stream `Server.read_request!` needs.
@@ -317,14 +301,14 @@ routed! = |request, route| match route {
 		}
 	Refuse(refusal) =>
 		match request.refuse!(refusal) {
-			Ok({}) => Ok(Refused)
+			Ok(_) => Ok(Refused)
 			Err(err) => Err(err)
 		}
 }
 
 ## The state after `on_close!`, or the state before it when it fails.
-closed! : WsServer.Service(s), s, Ws.Closure => s
-closed! = |service, state, closure| match (service.handlers.on_close!)(state, closure) {
+closed! : WsServer.Service(s), s, WsServer.Conn, Ws.Closure => s
+closed! = |service, state, conn, closure| match (service.handlers.on_close!)(state, conn, closure) {
 	Ok(after) => after
 	Err(_) => state
 }
