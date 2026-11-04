@@ -3,6 +3,9 @@
 ##   server one <port> <n>    serves one connection at a time (`WsServer.serve!`)
 ##   server many <port> <n>   serves several at once, in turns (`WsServer.serve_many!`)
 ##   server raw <port>        one connection with the two-step form and the methods
+##   server deadline <port>   one connection: `receive_within!` of 3000 ms twice (for
+##                            tests/ping_client.py, which pings every second and sends
+##                            one message 4.5 s after it connects), then a close
 ##
 ## Each stops after `n` connections have closed. Port 0 asks the system for a
 ## free port; the first line printed is `listening on <port>`. Routes:
@@ -28,6 +31,7 @@ app [main!] {
 import pf.Duration
 import pf.OsStr
 import pf.Stdout
+import pf.Monotonic
 import pf.Stderr
 import pf.Tcp
 import ws.Ws
@@ -57,6 +61,10 @@ main! = |args| {
 		"many" => WsServer.serve_many!(listener, {}, service, 10, start)
 		"raw" => match raw!(listener) {
 			Ok(done) => (done, Ok({}))
+			Err(err) => (start, Err(err))
+		}
+		"deadline" => match deadline!(listener) {
+			Ok({}) => (start, Ok({}))
 			Err(err) => (start, Err(err))
 		}
 		_ => (start, Ok({}))
@@ -155,4 +163,21 @@ raw! = |listener| {
 			Err(err) => return Err(err)
 		}
 	}
+}
+
+## One connection and two `receive_within!` calls of 3000 ms. The peer pings
+## every second, so the first ends in `TimedOut` after about 3 s (the Pings do
+## not extend it), and the second gets the message the peer sends in between.
+deadline! : Tcp.Listener => Try({}, WsServer.Error)
+deadline! = |listener| {
+	opened = WsServer.accept!(listener, {}, {})?
+	start = Monotonic.now!()
+	(c1, first) = WsServer.receive_within!(opened.conn, 3000)?
+	_ = Stdout.line!("first: ${Str.inspect(first)} after ${start.elapsed!().to_millis().to_str()} ms")
+	second_start = Monotonic.now!()
+	(c2, second) = WsServer.receive_within!(c1, 3000)?
+	_ = Stdout.line!("second: ${Str.inspect(second)} after ${second_start.elapsed!().to_millis().to_str()} ms")
+	closure = Ws.close_and_wait!(WsServer.ops, c2, 1000, "")?
+	_ = Stdout.line!("closed: ${Str.inspect(closure)}")
+	Ok({})
 }

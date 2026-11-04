@@ -1,4 +1,5 @@
 import pf.Duration
+import pf.Monotonic
 import pf.IOErr
 import pf.Random
 import pf.Tcp
@@ -15,7 +16,8 @@ import ws.Handshake
 ## when the connection opens. A read that times out consumes nothing and the
 ## connection keeps every byte it has read, so a timeout never loses data:
 ## `receive!` keeps waiting through it, and `poll!` returns `TimedOut` when it
-## passes with no message (`receive_within!` sets it for one call). Unlike basic-webserver, the read timeout is
+## passes with no bytes (an idle deadline: any frame, a Ping included, restarts
+## it). `receive_within!` is a total deadline instead. Unlike basic-webserver, the read timeout is
 ## yours to choose (`read_timeout`, 30 s by default), so a short one makes
 ## `poll!` a cheap check. A write that times out may have sent a prefix of its
 ## bytes, so it is the error `Tcp(TimedOut)`: drop the connection.
@@ -29,8 +31,11 @@ WsClient :: [].{
 	Errors : [Tcp(IOErr), Connect(IOErr), Entropy(IOErr), Interrupted]
 
 	## The link a connection runs over: the Tcp connection with the timeout
-	## of its reads, and the same socket with the timeout of its writes.
-	Link : { read : Tcp.Connection, write : Tcp.Connection }
+	## of its reads, the same socket with the timeout of its writes, and the
+	## total deadline of the call in progress (`receive_within!` sets it; it is
+	## `None` otherwise). `read_up_to!` gives `TimedOut` itself once the
+	## deadline has passed, and reads with only the time left before then.
+	Link : { read : Tcp.Connection, write : Tcp.Connection, deadline : [Within(Monotonic, Duration), None] }
 
 	## A connection. Its methods: `send!`, `receive!`, `poll!`, `close!`,
 	## `ping!`, `pong!`, `send_frame!`, `receive_frame!`; each returns the
@@ -75,7 +80,7 @@ WsClient :: [].{
 			Err(Interrupted) => return Err(Interrupted)
 			Err(TcpErr(err)) => return Err(Connect(err))
 		}
-		link = { read: tcp, write: tcp.with_timeout(write_timeout) }
+		link = { read: tcp, write: tcp.with_timeout(write_timeout), deadline: None }
 		Client.open!(WsClient.transport, link, request)
 	}
 
@@ -83,20 +88,21 @@ WsClient :: [].{
 	## (`Ws.ReceiveWithin`). The connection keeps every byte it has read, so a
 	## timeout loses nothing, even inside a frame.
 	##
-	## It sets the Tcp read timeout of the connection to `ms` for this call
-	## (`Conn.map_link`) and polls, so `ms` bounds each read: a peer that sends
-	## a frame in pieces, each within `ms`, can keep the call waiting longer.
-	## The connection's own `read_timeout` applies again after the call.
+	## `ms` is a total deadline: `TimedOut` comes `ms` milliseconds after the
+	## call, whatever arrives meanwhile. Ping, Pong and partial frames do not
+	## extend it. The deadline is kept in the link (`Conn.map_link`), and each
+	## Tcp read inside the call waits only for the time left. The connection's
+	## own `read_timeout` is untouched.
 	##
 	## ```roc
 	## (conn2, got) = WsClient.receive_within!(conn, 250)?
 	## ```
 	receive_within! : WsClient.Conn, U64 => Try((WsClient.Conn, [Message(Ws.Message), TimedOut]), WsClient.Error)
 	receive_within! = |conn, ms| {
-		own = conn.link().read
-		shortened = conn.map_link(|link| { ..link, read: own.with_timeout(Duration.millis(ms)) })
-		match shortened.poll!() {
-			Ok((after, got)) => Ok((after.map_link(|link| { ..link, read: own }), got))
+		start = Monotonic.now!()
+		limited = conn.map_link(|link| { ..link, deadline: Within(start, Duration.millis(ms)) })
+		match limited.poll!() {
+			Ok((after, got)) => Ok((after.map_link(|link| { ..link, deadline: None }), got))
 			Err(err) => Err(err)
 		}
 	}
@@ -128,12 +134,24 @@ WsClient :: [].{
 			Err(Interrupted) => Err(Interrupted)
 			Err(TcpErr(err)) => Err(Tcp(err))
 		},
-		read_up_to!: |link, n| match link.read.read_up_to!(n) {
-			Ok(bytes) => Ok((link, Data(bytes)))
-			Err(EndOfInput) => Ok((link, End))
-			Err(TcpErr(TimedOut)) => Ok((link, TimedOut))
-			Err(Interrupted) => Err(Interrupted)
-			Err(TcpErr(err)) => Err(Tcp(err))
+		read_up_to!: |link, n| {
+			conn = match link.deadline {
+				None => link.read
+				Within(start, budget) => {
+					left = budget.minus(start.elapsed!())
+					if left == Duration.zero {
+						return Ok((link, TimedOut))
+					}
+					link.read.with_timeout(left)
+				}
+			}
+			match conn.read_up_to!(n) {
+				Ok(bytes) => Ok((link, Data(bytes)))
+				Err(EndOfInput) => Ok((link, End))
+				Err(TcpErr(TimedOut)) => Ok((link, TimedOut))
+				Err(Interrupted) => Err(Interrupted)
+				Err(TcpErr(err)) => Err(Tcp(err))
+			}
 		},
 		random_bytes!: |link, n| {
 			bytes = WsClient.random_bytes!(n)?

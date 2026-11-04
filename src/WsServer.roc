@@ -1,4 +1,5 @@
 import pf.Duration
+import pf.Monotonic
 import pf.IOErr
 import pf.Tcp
 import ws.Ws
@@ -13,8 +14,9 @@ import ws.Server
 ## default). The request head must arrive within `handshake_timeout` (5 s),
 ## so a client that connects and says nothing holds the server for at most
 ## that long. After the handshake each read waits `read_timeout` (30 s):
-## `receive!` keeps waiting through it, `poll!` gives `TimedOut`, and
-## `receive_within!` sets it for one call. A read that times out consumes
+## `receive!` keeps waiting through it, `poll!` gives `TimedOut` (an idle
+## deadline: any frame, a Ping included, restarts it), and `receive_within!`
+## is a total deadline for one call. A read that times out consumes
 ## nothing. A write that times out may have sent a prefix of its bytes, so it
 ## is the error `Tcp(TimedOut)`: drop the connection.
 ##
@@ -37,8 +39,11 @@ WsServer :: [].{
 	Errors : [Tcp(IOErr), Accept(IOErr), ListenerClosed, Interrupted]
 
 	## The link a connection runs over: the Tcp connection with the timeout
-	## of its reads, and the same socket with the timeout of its writes.
-	Link : { read : Tcp.Connection, write : Tcp.Connection }
+	## of its reads, the same socket with the timeout of its writes, and the
+	## total deadline of the call in progress (`receive_within!` sets it; it is
+	## `None` otherwise). `read_up_to!` gives `TimedOut` itself once the
+	## deadline has passed, and reads with only the time left before then.
+	Link : { read : Tcp.Connection, write : Tcp.Connection, deadline : [Within(Monotonic, Duration), None] }
 
 	## A server connection. Its methods: `send!`, `receive!`, `poll!`,
 	## `close!`, `ping!`, `pong!`, `send_frame!`, `receive_frame!`, `link`,
@@ -101,6 +106,7 @@ WsServer :: [].{
 		link = {
 			read: tcp.with_timeout(options.?handshake_timeout ?? Duration.seconds(5)),
 			write: tcp.with_timeout(options.?write_timeout ?? Duration.seconds(30)),
+			deadline: None,
 		}
 		match Server.read_request!(WsServer.transport, link) {
 			Ok(request) => Ok(request.map_link(|l| { ..l, read: tcp }))
@@ -122,14 +128,15 @@ WsServer :: [].{
 	}
 
 	## The next message, or `TimedOut` when `ms` milliseconds pass first
-	## (`Ws.ReceiveWithin`), as `WsClient.receive_within!` does: the Tcp read
-	## timeout is `ms` for this call, and `ms` bounds each read.
+	## (`Ws.ReceiveWithin`), as `WsClient.receive_within!` does: `ms` is a
+	## total deadline since the call, and Ping, Pong and partial frames do not
+	## extend it.
 	receive_within! : WsServer.Conn, U64 => Try((WsServer.Conn, [Message(Ws.Message), TimedOut]), WsServer.Error)
 	receive_within! = |conn, ms| {
-		own = conn.link().read
-		shortened = conn.map_link(|link| { ..link, read: own.with_timeout(Duration.millis(ms)) })
-		match shortened.poll!() {
-			Ok((after, got)) => Ok((after.map_link(|link| { ..link, read: own }), got))
+		start = Monotonic.now!()
+		limited = conn.map_link(|link| { ..link, deadline: Within(start, Duration.millis(ms)) })
+		match limited.poll!() {
+			Ok((after, got)) => Ok((after.map_link(|link| { ..link, deadline: None }), got))
 			Err(err) => Err(err)
 		}
 	}
@@ -281,12 +288,24 @@ WsServer :: [].{
 			Err(Interrupted) => Err(Interrupted)
 			Err(TcpErr(err)) => Err(Tcp(err))
 		},
-		read_up_to!: |link, n| match link.read.read_up_to!(n) {
-			Ok(bytes) => Ok((link, Data(bytes)))
-			Err(EndOfInput) => Ok((link, End))
-			Err(TcpErr(TimedOut)) => Ok((link, TimedOut))
-			Err(Interrupted) => Err(Interrupted)
-			Err(TcpErr(err)) => Err(Tcp(err))
+		read_up_to!: |link, n| {
+			conn = match link.deadline {
+				None => link.read
+				Within(start, budget) => {
+					left = budget.minus(start.elapsed!())
+					if left == Duration.zero {
+						return Ok((link, TimedOut))
+					}
+					link.read.with_timeout(left)
+				}
+			}
+			match conn.read_up_to!(n) {
+				Ok(bytes) => Ok((link, Data(bytes)))
+				Err(EndOfInput) => Ok((link, End))
+				Err(TcpErr(TimedOut)) => Ok((link, TimedOut))
+				Err(Interrupted) => Err(Interrupted)
+				Err(TcpErr(err)) => Err(Tcp(err))
+			}
 		},
 	}
 }

@@ -5,6 +5,9 @@
 ##   client slow [port]   asks the echo server to wait 3 s with a 500 ms read timeout:
 ##                        `poll!` gives TimedOut, then the reply, with nothing lost; then
 ##                        `receive_within!` with 200 ms and with 5000 ms.
+##   client deadline [port]  against tests/ping_server.py, which pings every second and sends
+##                        data only when asked: `receive_within!` of 3000 ms gives TimedOut
+##                        after about 3 s, then a message sent after 1.5 s is delivered.
 ##   client surreal       sends JSON `ping` and `version` RPCs to SurrealDB at
 ##                        ws://127.0.0.1:8000/rpc.
 app [main!] {
@@ -14,6 +17,7 @@ app [main!] {
 }
 
 import pf.Duration
+import pf.Monotonic
 import pf.OsStr
 import pf.Stdout
 import pf.Stderr
@@ -29,6 +33,8 @@ main! = |args| {
 			["echo", port] => echo!(port)
 			["slow"] => slow!("9001")
 			["slow", port] => slow!(port)
+			["deadline"] => deadline!("9003")
+			["deadline", port] => deadline!(port)
 			["surreal"] => surreal!({})
 			_ => Ok("usage: client echo [port] | slow [port] | surreal\n")
 		}
@@ -152,4 +158,20 @@ slow! = |port| {
 	(c5, long) = (WsClient.ops.receive_within!)(c4, 5000)?
 	_ = Ws.close_and_wait!(WsClient.ops, c5, 1000, "")?
 	Ok("first poll: ${Str.inspect(first)}\ntimed out polls before the reply: ${($polls - 1).to_str()}\nreply: ${Str.inspect($last)}\nreceive_within 200 ms: ${Str.inspect(short)}\nreceive_within 5000 ms: ${Str.inspect(long)}\n")
+}
+
+## A total deadline against a peer that pings every second and sends no data.
+deadline! : Str => Try(Str, WsClient.Error)
+deadline! = |port| {
+	opened = WsClient.connect!({ url: "ws://127.0.0.1:${port}/" })?
+	start = Monotonic.now!()
+	(c1, first) = WsClient.receive_within!(opened.conn, 3000)?
+	first_ms = start.elapsed!().to_millis()
+	# The connection still works: the peer sends a message 1.5 s after it is asked.
+	c2 = c1.send!(Text("data-after:1.5"))?
+	second_start = Monotonic.now!()
+	(c3, second) = WsClient.receive_within!(c2, 3000)?
+	second_ms = second_start.elapsed!().to_millis()
+	_ = Ws.close_and_wait!(WsClient.ops, c3, 1000, "")?
+	Ok("first: ${Str.inspect(first)} after ${first_ms.to_str()} ms\nsecond: ${Str.inspect(second)} after ${second_ms.to_str()} ms\n")
 }

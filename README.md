@@ -9,7 +9,7 @@ to be one (`WsServer`).
 app [main!] {
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.5/AKLgwxjBQN2XkE4G5sZtzrjPSxhwo6XmJRSPdWhpgVUN.tar.zst",
-	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.2/A6pcg2YPiT75rhPyftEGQPw9XtqvrLZbmWjruiDY8iHp.tar.zst",
+	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.3/9c6XLWHRSREuaoELdH1a835Yopw92Jxy2b5e151X6mZj.tar.zst",
 }
 
 import pf.OsStr
@@ -40,7 +40,7 @@ Each call returns the updated connection: keep using the newest one.
   `send!`, `receive!`, `poll!`, `close!`, `ping!`, `pong!`, `send_frame!`,
   `receive_frame!`.
 - `WsClient.receive_within! : WsClient.Conn, U64 => Try((WsClient.Conn, [Message(Ws.Message), TimedOut]), WsClient.Error)`,
-  the next message or `TimedOut` after `ms` milliseconds (`Ws.ReceiveWithin`).
+  the next message or `TimedOut` `ms` milliseconds after the call, whatever arrives meanwhile (`Ws.ReceiveWithin`).
 - `WsClient.ops`, the operations as a record (`Ws.Raw`, `Ws.Poll` and
   `Ws.ReceiveWithin`), for code generic over features such as
   `Ws.close_and_wait!`, `Ws.drive!`, `Ws.messages`.
@@ -62,7 +62,7 @@ messages on their way, then ends with `Closed`). `opened.extensions` is
 app [main!] {
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.5/AKLgwxjBQN2XkE4G5sZtzrjPSxhwo6XmJRSPdWhpgVUN.tar.zst",
-	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.2/A6pcg2YPiT75rhPyftEGQPw9XtqvrLZbmWjruiDY8iHp.tar.zst",
+	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.3/9c6XLWHRSREuaoELdH1a835Yopw92Jxy2b5e151X6mZj.tar.zst",
 }
 
 import pf.Duration
@@ -141,23 +141,30 @@ released. Once a call gives `Closed`, drop the connection (and the result of
 | `TimedOut` | `Err(TcpErr(TimedOut))` after `read_timeout` |
 | `Ws.Random.random_bytes!` | `Random.seed_u64!`, 8 bytes per call |
 | `Ws.Connect` | `Tcp.connect!` with `connect_timeout` |
-| `poll!` | `Ok(TimedOut)` when a read times out with no message |
-| `Ws.ReceiveWithin.receive_within!(c, ms)` | `Conn.map_link` sets the Tcp read timeout to `ms`, then `poll!`; the connection's own timeout applies again afterwards |
+| `poll!` | `Ok(TimedOut)` when one read times out with no bytes (an idle deadline: any frame, a Ping included, restarts it) |
+| `Ws.ReceiveWithin.receive_within!(c, ms)` | `Conn.map_link` puts a total deadline in the link, then `poll!`; `read_up_to!` reads with the time left and gives `TimedOut` when none is left |
 
 ## Timeouts
 
 basic-cli's Tcp has per-connection timeouts: each read or write is bounded as
 a whole. A read that times out consumes nothing and the connection keeps
 every byte that arrived, so a timeout never loses data, even inside a frame.
-`receive!` keeps waiting through `read_timeout`; `poll!` returns `TimedOut`
-when it passes with no message, so a short `read_timeout` (say 200 ms) makes
-`poll!` a cheap check. `receive_within!(conn, ms)` sets the timeout for
-one call (it uses `Client.Conn.map_link` of roc-websocket to give the
-link a read connection with that timeout, polls, and puts the original back). `ms` bounds each
-read, so a peer that trickles one frame in pieces, each within `ms`, can keep the call
-waiting longer than `ms`. A write that times out may have sent a
-prefix of its bytes: it is the error `Tcp(TimedOut)` and the connection should
-be dropped.
+`receive!` keeps waiting through `read_timeout`. `poll!` returns `TimedOut`
+when one read passes `read_timeout` with no bytes, so a short `read_timeout`
+(say 200 ms) makes `poll!` a cheap check. It is an idle deadline: any frame, a
+Ping included, restarts it, so it cannot bound the wait for a data message
+from a peer that pings.
+
+`receive_within!(conn, ms)` is a total deadline (`Ws.ReceiveWithin`): `TimedOut`
+comes `ms` milliseconds after the call, whatever arrives meanwhile. Ping, Pong
+and partial frames do not extend it. The deadline lives in the link
+(`Link.deadline`, set with `Client.Conn.map_link` of roc-websocket): each Tcp
+read inside the call waits only for the time left, and `read_up_to!` gives
+`TimedOut` itself once none is left. The connection's own `read_timeout` is not
+changed. `TimedOut` loses nothing.
+
+A write that times out may have sent a prefix of its bytes: it is the error
+`Tcp(TimedOut)` and the connection should be dropped.
 
 ## Limitations
 
@@ -169,6 +176,27 @@ be dropped.
   source, as the key and the masks need.
 
 ## Changes
+
+### 0.0.3
+
+Fixed: `WsClient.receive_within!` and `WsServer.receive_within!` are a total
+deadline. In 0.0.2 `ms` was the Tcp read timeout of each read, and `poll!`
+loops over reads with a Ping counting as progress, so a peer that pinged every
+second kept `receive_within!(conn, 3000)` waiting for ever. Now `TimedOut`
+comes `ms` milliseconds after the call (about 3.0 s in the e2e test, against a
+peer that pings every second and sends no data). Ping, Pong and partial frames
+do not extend it.
+
+- `WsClient.Link` and `WsServer.Link` gain a field,
+  `deadline : [Within(Monotonic, Duration), None]` (`None` outside
+  `receive_within!`). Code that builds a link by hand must add it; the
+  connection functions build it for you.
+- `poll!`, `receive!`, `read_timeout` and `serve_many!` behave as before
+  (`serve_many!` polls each connection with `receive_within!(conn, slice)`, now
+  a total slice).
+- New e2e tests (`scripts/all_tests.sh --e2e`): `tests/ping_server.py` against
+  `client deadline`, and `tests/ping_client.py` against `server deadline`.
+- Still roc-websocket 0.0.5 (`.roc-version` `nightly-2026-11-03-34bd006`).
 
 ### 0.0.2
 
@@ -212,14 +240,14 @@ client example and `tests/server_test.py`, raw sockets and, when `$PYTHON` has t
 `PYTHON=/path/to/venv/bin/python ROC=/path/to/roc scripts/all_tests.sh --e2e`.
 
 `examples/client.roc` has `echo [port]` (the Python stdlib test server in `tests/`),
-`slow [port]` (`poll!` across a 500 ms read timeout, then `receive_within!`) and `surreal` (JSON `ping` and
+`slow [port]` (`poll!` across a 500 ms read timeout, then `receive_within!`), `deadline [port]` (a total `receive_within!` against `tests/ping_server.py`, which pings every second) and `surreal` (JSON `ping` and
 `version` RPCs to SurrealDB at `ws://127.0.0.1:8000/rpc`; `--e2e` runs it when
 SurrealDB answers on that port).
 
-The release URL (`<hash>` above) is printed by `scripts/bundle.sh 0.0.2` and in the
+The release URL (`<hash>` above) is printed by `scripts/bundle.sh 0.0.3` and in the
 release notes of each [release](https://github.com/Karakatiza666/roc-basic-cli-websocket/releases).
 
 ```sh
-ROC=/path/to/roc scripts/bundle.sh 0.0.2  # dist/<hash>.tar.zst and its release URL
+ROC=/path/to/roc scripts/bundle.sh 0.0.3  # dist/<hash>.tar.zst and its release URL
 ROC=/path/to/roc scripts/test_bundle.sh   # checks the examples against the bundle
 ```

@@ -3,6 +3,9 @@
 # With --e2e, also builds examples/client.roc, starts tests/echo_server.py on
 # port 9001 and runs the client against it (needs python3). When SurrealDB
 # answers on 127.0.0.1:8000 (root/root, any auth), also runs `client surreal`.
+# It also runs tests/ping_server.py against `client deadline` (a total
+# receive_within! deadline against a peer that pings every second), and
+# `server deadline` against tests/ping_client.py.
 # Then builds examples/server.roc and runs, against each of its modes, the
 # client example and tests/server_test.py, each on a port the system chooses. $PYTHON (default
 # python3) runs the tests; with the `websockets` package installed in it, they
@@ -40,6 +43,20 @@ if [[ "${1:-}" == "--e2e" ]]; then
 	grep -q 'reply: Message(Text("woke up"))' <<<"$slow"
 	grep -q 'receive_within 200 ms: TimedOut' <<<"$slow"
 	grep -q 'receive_within 5000 ms: Message(Text("woke up"))' <<<"$slow"
+	# A total deadline: the peer pings every second and sends no data, so
+	# receive_within!(conn, 3000) must give TimedOut after about 3 s, and a
+	# message that arrives before the deadline is still delivered.
+	in_range() { [[ $1 =~ ^[0-9]+$ ]] && ((10#$1 >= $2 && 10#$1 <= $3)); }
+	python3 -I tests/ping_server.py 9003 2>"$out/ping_server.log" &
+	servers+=("$!")
+	sleep 1
+	deadline="$("$out/client" deadline 9003)"
+	echo "$deadline"
+	grep -q '^first: TimedOut after ' <<<"$deadline"
+	in_range "$(sed -n 's/^first: TimedOut after \([0-9]*\) ms$/\1/p' <<<"$deadline")" 2500 5000
+	grep -q '^second: Message(Text("data")) after ' <<<"$deadline"
+	in_range "$(sed -n 's/^second: .* after \([0-9]*\) ms$/\1/p' <<<"$deadline")" 1000 2900
+	kill "${servers[-1]}"
 	if (: >/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
 		surreal="$("$out/client" surreal)"
 		echo "$surreal"
@@ -74,6 +91,18 @@ if [[ "${1:-}" == "--e2e" ]]; then
 	wait "${servers[-1]}"
 	cat "$out/stop.log"
 	grep -q 'done: 7 messages, 2 connections' "$out/stop.log"
+	# The same on the server side, against a client that pings every second:
+	# the first receive_within! gives TimedOut after about 3 s, the second
+	# delivers the message the client sends 1.5 s later.
+	start_server deadline deadline
+	"$PYTHON" -I tests/ping_client.py "$port"
+	wait "${servers[-1]}"
+	cat "$out/deadline.log"
+	grep -q '^first: TimedOut after ' "$out/deadline.log"
+	in_range "$(sed -n 's/^first: TimedOut after \([0-9]*\) ms$/\1/p' "$out/deadline.log")" 2500 5000
+	grep -q '^second: Message(Text("late")) after ' "$out/deadline.log"
+	in_range "$(sed -n 's/^second: .* after \([0-9]*\) ms$/\1/p' "$out/deadline.log")" 1000 2900
+	grep -q 'closed: { by: Us, clean: True, code: 1000' "$out/deadline.log"
 	# Each mode against the test client.
 	for mode in one many; do
 		start_server "$mode" "$mode" 1000
