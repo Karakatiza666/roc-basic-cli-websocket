@@ -12,8 +12,8 @@
 ##                        ws://127.0.0.1:8000/rpc.
 app [main!] {
 	cli_ws: "../src/main.roc",
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.27.0/9yjxqdGTP4xSpSEmDazwTmRsehfRZzA19pwEKkR6fj1g.tar.zst",
-	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.6/6rcitHh7bVV7D4A2aubD6H6yLHUgtXLi6jRwxjomSwVv.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
+	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.7/EBNZjRmQ5PZiJAE5UMUFePtQFdb1FnsQX1qagVuiCwM9.tar.zst",
 }
 
 import pf.Duration

@@ -7,9 +7,9 @@ to be one (`WsServer`).
 
 ```roc
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.27.0/9yjxqdGTP4xSpSEmDazwTmRsehfRZzA19pwEKkR6fj1g.tar.zst",
-	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.6/6rcitHh7bVV7D4A2aubD6H6yLHUgtXLi6jRwxjomSwVv.tar.zst",
-	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.4/B5j45zNdyW8Qxq6GpQ6ZVNmcPC5hwx3TxPRW4cq8wiLV.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
+	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.7/EBNZjRmQ5PZiJAE5UMUFePtQFdb1FnsQX1qagVuiCwM9.tar.zst",
+	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.5/AZpgG3RszEahBa67zc9yCJcAKe4MKw5HucDouNpi727b.tar.zst",
 }
 
 import pf.OsStr
@@ -60,9 +60,9 @@ messages on their way, then ends with `Closed`). `opened.extensions` is
 
 ```roc
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.27.0/9yjxqdGTP4xSpSEmDazwTmRsehfRZzA19pwEKkR6fj1g.tar.zst",
-	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.6/6rcitHh7bVV7D4A2aubD6H6yLHUgtXLi6jRwxjomSwVv.tar.zst",
-	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.4/B5j45zNdyW8Qxq6GpQ6ZVNmcPC5hwx3TxPRW4cq8wiLV.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
+	ws: "https://github.com/Karakatiza666/roc-websocket/releases/download/0.0.7/EBNZjRmQ5PZiJAE5UMUFePtQFdb1FnsQX1qagVuiCwM9.tar.zst",
+	cli_ws: "https://github.com/Karakatiza666/roc-basic-cli-websocket/releases/download/0.0.5/AZpgG3RszEahBa67zc9yCJcAKe4MKw5HucDouNpi727b.tar.zst",
 }
 
 import pf.Duration
@@ -177,6 +177,22 @@ A write that times out may have sent a prefix of its bytes: it is the error
 
 ## Changes
 
+### 0.0.5
+
+No API changes.
+
+| Dependency | Before | Now |
+| --- | --- | --- |
+| basic-cli | 0.27.0 | 0.28.1 |
+| roc-websocket | 0.0.6 | 0.0.7 |
+| Roc (`.roc-version`) | `nightly-2026-11-07-ad3a5d2` | `nightly-2026-11-15-f25da45` |
+
+Roc nightlies from 2026-11-10 build every executable as PIE. The start code
+of basic-cli 0.27.0 does not apply PIE relocations, so its programs crash at
+start with those nightlies. basic-cli 0.28.0 and newer fix this.
+Every adapter of a program must use the same roc-websocket version.
+roc-basic-webserver-websocket 0.0.4 also uses roc-websocket 0.0.7.
+
 ### 0.0.4
 
 No API changes.
@@ -256,10 +272,10 @@ client example and `tests/server_test.py`, raw sockets and, when `$PYTHON` has t
 `version` RPCs to SurrealDB at `ws://127.0.0.1:8000/rpc`; `--e2e` runs it when
 SurrealDB answers on that port).
 
-The release URL (`<hash>` above) is printed by `scripts/bundle.sh 0.0.4` and in the
+The release URL (`<hash>` above) is printed by `scripts/bundle.sh 0.0.5` and in the
 release notes of each [release](https://github.com/Karakatiza666/roc-basic-cli-websocket/releases).
 
 ```sh
-ROC=/path/to/roc scripts/bundle.sh 0.0.4  # dist/<hash>.tar.zst and its release URL
+ROC=/path/to/roc scripts/bundle.sh 0.0.5  # dist/<hash>.tar.zst and its release URL
 ROC=/path/to/roc scripts/test_bundle.sh   # checks the examples against the bundle
 ```
